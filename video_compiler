@@ -1,0 +1,262 @@
+"""
+Video Compiler for Generative Art Frames
+
+Installation:
+pip install opencv-python pillow numpy tqdm
+
+For better quality (optional):
+pip install imageio imageio-ffmpeg
+"""
+
+import cv2
+import numpy as np
+from pathlib import Path
+from PIL import Image
+from tqdm import tqdm
+import argparse
+
+class VideoCompiler:
+    """Compile image frames into smooth video"""
+    
+    def __init__(self, fps=30, quality='high'):
+        self.fps = fps
+        self.quality = quality
+        
+        # Quality presets
+        self.quality_settings = {
+            'draft': {'bitrate': '2M', 'codec': 'mp4v'},
+            'medium': {'bitrate': '5M', 'codec': 'mp4v'},
+            'high': {'bitrate': '10M', 'codec': 'mp4v'},
+            'ultra': {'bitrate': '20M', 'codec': 'mp4v'}
+        }
+    
+    def compile_video(self, frames_dir, output_file='output.mp4', 
+                     start_frame=0, end_frame=None, reverse=False,
+                     loop_back=False, apply_transitions=False):
+        """
+        Compile frames into video
+        
+        Args:
+            frames_dir: Directory containing frame images
+            output_file: Output video filename
+            start_frame: Starting frame number
+            end_frame: Ending frame number (None = all frames)
+            reverse: Play video in reverse
+            loop_back: Add reverse sequence for seamless loop
+            apply_transitions: Add smooth transitions between frames
+        """
+        
+        frames_path = Path(frames_dir)
+        
+        # Get all frame files
+        frame_files = sorted(frames_path.glob('frame_*.png'))
+        
+        if not frame_files:
+            frame_files = sorted(frames_path.glob('*.png'))
+        
+        if not frame_files:
+            print(f"❌ No frames found in {frames_dir}")
+            return
+        
+        # Apply frame range
+        if end_frame:
+            frame_files = frame_files[start_frame:end_frame]
+        else:
+            frame_files = frame_files[start_frame:]
+        
+        if reverse:
+            frame_files = list(reversed(frame_files))
+        
+        if loop_back:
+            frame_files = frame_files + list(reversed(frame_files[1:-1]))
+        
+        print(f"📹 Compiling {len(frame_files)} frames into video...")
+        print(f"   FPS: {self.fps}")
+        print(f"   Quality: {self.quality}")
+        
+        # Read first frame to get dimensions
+        first_frame = cv2.imread(str(frame_files[0]))
+        height, width, _ = first_frame.shape
+        
+        print(f"   Resolution: {width}x{height}")
+        
+        # Setup video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_file, fourcc, self.fps, (width, height))
+        
+        # Process frames
+        prev_frame = None
+        for i, frame_file in enumerate(tqdm(frame_files, desc="Processing frames")):
+            frame = cv2.imread(str(frame_file))
+            
+            if frame is None:
+                print(f"⚠️  Warning: Could not read {frame_file}")
+                continue
+            
+            # Resize if needed
+            if frame.shape[:2] != (height, width):
+                frame = cv2.resize(frame, (width, height))
+            
+            # Apply smooth transition
+            if apply_transitions and prev_frame is not None and i % 10 == 0:
+                # Add 3 interpolated frames for smoothness
+                for alpha in [0.25, 0.5, 0.75]:
+                    blended = cv2.addWeighted(prev_frame, 1-alpha, frame, alpha, 0)
+                    out.write(blended)
+            
+            out.write(frame)
+            prev_frame = frame.copy()
+        
+        out.release()
+        print(f"\n✅ Video saved: {output_file}")
+        print(f"   Duration: {len(frame_files)/self.fps:.2f} seconds")
+        
+        return output_file
+    
+    def create_comparison_video(self, original_dir, enhanced_dir, output_file='comparison.mp4'):
+        """Create side-by-side comparison video"""
+        
+        original_path = Path(original_dir)
+        enhanced_path = Path(enhanced_dir)
+        
+        original_frames = sorted(original_path.glob('*.png'))
+        enhanced_frames = sorted(enhanced_path.glob('*.png'))
+        
+        if len(original_frames) != len(enhanced_frames):
+            print("⚠️  Warning: Frame count mismatch between directories")
+            min_frames = min(len(original_frames), len(enhanced_frames))
+            original_frames = original_frames[:min_frames]
+            enhanced_frames = enhanced_frames[:min_frames]
+        
+        print(f"📹 Creating comparison video with {len(original_frames)} frames...")
+        
+        # Read first frames
+        orig = cv2.imread(str(original_frames[0]))
+        enh = cv2.imread(str(enhanced_frames[0]))
+        
+        # Resize to same height
+        height = orig.shape[0]
+        width = orig.shape[1]
+        
+        enh = cv2.resize(enh, (width, height))
+        
+        # Combined width
+        combined_width = width * 2 + 20  # 20px gap
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_file, fourcc, self.fps, (combined_width, height))
+        
+        for orig_file, enh_file in tqdm(zip(original_frames, enhanced_frames), 
+                                        total=len(original_frames),
+                                        desc="Creating comparison"):
+            orig = cv2.imread(str(orig_file))
+            enh = cv2.imread(str(enh_file))
+            
+            if orig is None or enh is None:
+                continue
+            
+            # Resize
+            orig = cv2.resize(orig, (width, height))
+            enh = cv2.resize(enh, (width, height))
+            
+            # Create combined frame
+            combined = np.zeros((height, combined_width, 3), dtype=np.uint8)
+            combined[:, :width] = orig
+            combined[:, width+20:] = enh
+            
+            # Add labels
+            cv2.putText(combined, 'ORIGINAL', (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(combined, 'GAN ENHANCED', (width + 30, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            out.write(combined)
+        
+        out.release()
+        print(f"\n✅ Comparison video saved: {output_file}")
+    
+    def create_timelapse(self, frames_dir, output_file='timelapse.mp4', 
+                        speed_multiplier=4):
+        """Create timelapse by skipping frames"""
+        
+        frames_path = Path(frames_dir)
+        frame_files = sorted(frames_path.glob('*.png'))
+        
+        # Skip frames for speedup
+        selected_frames = frame_files[::speed_multiplier]
+        
+        print(f"🎬 Creating timelapse (original: {len(frame_files)}, "
+              f"timelapse: {len(selected_frames)} frames)")
+        
+        first_frame = cv2.imread(str(selected_frames[0]))
+        height, width, _ = first_frame.shape
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_file, fourcc, self.fps, (width, height))
+        
+        for frame_file in tqdm(selected_frames, desc="Creating timelapse"):
+            frame = cv2.imread(str(frame_file))
+            if frame is not None:
+                frame = cv2.resize(frame, (width, height))
+                out.write(frame)
+        
+        out.release()
+        print(f"\n✅ Timelapse saved: {output_file}")
+        print(f"   Speed: {speed_multiplier}x faster")
+
+
+def create_seamless_loop(frames_dir, output_file='loop.mp4', fps=30):
+    """Create perfectly looping video"""
+    compiler = VideoCompiler(fps=fps, quality='high')
+    compiler.compile_video(frames_dir, output_file, loop_back=True)
+    print("🔁 Seamless loop created!")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Compile frames into video')
+    
+    parser.add_argument('frames_dir', help='Directory containing frames')
+    parser.add_argument('-o', '--output', default='output.mp4', help='Output video file')
+    parser.add_argument('-f', '--fps', type=int, default=30, help='Frames per second')
+    parser.add_argument('-q', '--quality', choices=['draft', 'medium', 'high', 'ultra'],
+                       default='high', help='Video quality')
+    parser.add_argument('--start', type=int, default=0, help='Start frame')
+    parser.add_argument('--end', type=int, default=None, help='End frame')
+    parser.add_argument('--reverse', action='store_true', help='Play in reverse')
+    parser.add_argument('--loop', action='store_true', help='Create seamless loop')
+    parser.add_argument('--smooth', action='store_true', help='Add frame interpolation')
+    parser.add_argument('--timelapse', type=int, help='Create timelapse (speed multiplier)')
+    parser.add_argument('--compare', help='Create comparison video (enhanced frames dir)')
+    
+    args = parser.parse_args()
+    
+    compiler = VideoCompiler(fps=args.fps, quality=args.quality)
+    
+    if args.timelapse:
+        compiler.create_timelapse(args.frames_dir, args.output, args.timelapse)
+    elif args.compare:
+        compiler.create_comparison_video(args.frames_dir, args.compare, args.output)
+    else:
+        compiler.compile_video(
+            args.frames_dir,
+            args.output,
+            start_frame=args.start,
+            end_frame=args.end,
+            reverse=args.reverse,
+            loop_back=args.loop,
+            apply_transitions=args.smooth
+        )
+    
+    print("\n" + "="*60)
+    print("USAGE EXAMPLES:")
+    print("  Basic:      python video_compiler.py frames/")
+    print("  Loop:       python video_compiler.py frames/ --loop")
+    print("  Smooth:     python video_compiler.py frames/ --smooth")
+    print("  Timelapse:  python video_compiler.py frames/ --timelapse 4")
+    print("  Compare:    python video_compiler.py frames/ --compare enhanced_frames/")
+    print("  Range:      python video_compiler.py frames/ --start 0 --end 500")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    main()

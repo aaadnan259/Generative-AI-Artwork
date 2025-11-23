@@ -1,0 +1,166 @@
+import pygame
+import math
+import random
+import sys
+from pathlib import Path
+
+pygame.init()
+
+WIDTH, HEIGHT = 1024, 1024
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption(f"Flowing Generative Art ({WIDTH}x{HEIGHT})")
+clock = pygame.time.Clock()
+screen.fill((15, 15, 25))
+
+frames_dir = Path("frames")
+frames_dir.mkdir(exist_ok=True)
+print(f"Frames will be saved to: {frames_dir.absolute()}")
+
+t = 0
+
+class FlowParticle:
+    def __init__(self):
+        self.x = random.uniform(0, WIDTH)
+        self.y = random.uniform(0, HEIGHT)
+        self.age = 0
+        self.max_age = random.randint(200, 400)
+        self.hue_offset = random.uniform(0, 360)
+        self.speed = random.uniform(0.3, 1.2)
+        self.noise_offset = random.uniform(0, 1000)
+        
+    def update(self, t):
+        angle = math.sin(self.x * 0.01 + t * 0.5) * math.cos(self.y * 0.01 + t * 0.3) * math.pi * 2
+        angle += math.sin(self.y * 0.008 + self.noise_offset) * 2
+        self.x += math.cos(angle) * self.speed
+        self.y += math.sin(angle) * self.speed
+        if self.x < 0: self.x = WIDTH
+        if self.x > WIDTH: self.x = 0
+        if self.y < 0: self.y = HEIGHT
+        if self.y > HEIGHT: self.y = 0
+        self.age += 1
+        return self.age < self.max_age
+    
+    def draw(self, surface, t):
+        hue = (t * 20 + self.hue_offset) % 360
+        h = hue / 60
+        c = 0.8
+        x = c * (1 - abs(h % 2 - 1))
+        if h < 1: r, g, b = c, x, 0
+        elif h < 2: r, g, b = x, c, 0
+        elif h < 3: r, g, b = 0, c, x
+        elif h < 4: r, g, b = 0, x, c
+        elif h < 5: r, g, b = x, 0, c
+        else: r, g, b = c, 0, x
+        brightness = 150 + 105 * math.sin(t * 0.1 + self.hue_offset * 0.01)
+        color = (
+            max(0, min(255, int(r * brightness))),
+            max(0, min(255, int(g * brightness))),
+            max(0, min(255, int(b * brightness)))
+        )
+        alpha = int(255 * (1 - self.age / self.max_age) * 0.15)
+        size = 2 + math.sin(t * 0.05 + self.noise_offset) * 1
+        pygame.draw.circle(surface, (*color, alpha), (int(self.x), int(self.y)), int(size))
+
+def draw_spiral_waves(surface, t):
+    center_x = WIDTH / 2 + math.sin(t * 0.1) * 100
+    center_y = HEIGHT / 2 + math.cos(t * 0.15) * 100
+    for i in range(8):
+        angle_offset = (i / 8) * math.pi * 2 + t * 0.2
+        radius_base = 50 + i * 40
+        points = []
+        for j in range(100):
+            angle = (j / 100) * math.pi * 2 * 3 + angle_offset
+            radius = radius_base + math.sin(j * 0.1 + t) * 20
+            x = center_x + math.cos(angle) * radius
+            y = center_y + math.sin(angle) * radius
+            points.append((x, y))
+        if len(points) > 1:
+            hue = (t * 30 + i * 45) % 360
+            alpha = 30 + 20 * math.sin(t * 0.3 + i)
+            h = hue / 60
+            if h < 1: r, g, b = 1, h % 1, 0
+            elif h < 2: r, g, b = 2 - h, 1, 0
+            elif h < 3: r, g, b = 0, 1, (h - 2)
+            elif h < 4: r, g, b = 0, 4 - h, 1
+            elif h < 5: r, g, b = h - 4, 0, 1
+            else: r, g, b = 1, 0, 6 - h
+            color = (
+                max(0, min(255, int(r * 180))),
+                max(0, min(255, int(g * 180))),
+                max(0, min(255, int(b * 180))),
+                max(0, min(255, int(alpha)))
+            )
+            try:
+                pygame.draw.lines(surface, color, False, points, 2)
+            except:
+                pass
+
+particles = [FlowParticle() for _ in range(150)]
+frame_count = 0
+running = True
+frames_saved = 0
+
+print("\n" + "="*60)
+print(f"FLOWING GENERATIVE ART - {WIDTH}x{HEIGHT} Resolution")
+print("="*60)
+print("CONTROLS:")
+print("  S: Save current frame manually")
+print("  ESC/Close: Exit and save final frame")
+print(f"\nAuto-saving every 10 frames to './frames/' directory")
+print(f"Resolution: {WIDTH}x{HEIGHT} {'(HIGH QUALITY)' if WIDTH >= 1024 else ''}")
+print("="*60 + "\n")
+
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            elif event.key == pygame.K_s:
+                filename = f"manual_save_{frame_count}.png"
+                pygame.image.save(screen, filename)
+                print(f"✓ Manually saved: {filename}")
+    
+    fade_surface = pygame.Surface((WIDTH, HEIGHT))
+    fade_surface.fill((15, 15, 25))
+    fade_surface.set_alpha(8)
+    screen.blit(fade_surface, (0, 0))
+    
+    particle_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    spiral_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    
+    draw_spiral_waves(spiral_surface, t)
+    
+    for particle in particles[:]:
+        if not particle.update(t):
+            particles.remove(particle)
+            particles.append(FlowParticle())
+        particle.draw(particle_surface, t)
+    
+    screen.blit(spiral_surface, (0, 0))
+    screen.blit(particle_surface, (0, 0))
+    
+    if frame_count % 10 == 0:
+        frame_filename = frames_dir / f"frame_{frame_count:05d}.png"
+        pygame.image.save(screen, str(frame_filename))
+        frames_saved += 1
+        if frames_saved % 10 == 0:
+            print(f"Progress: {frames_saved} frames saved (frame #{frame_count})")
+    
+    pygame.display.flip()
+    t += 0.05
+    frame_count += 1
+    clock.tick(60)
+
+final_frame = frames_dir / "final_frame.png"
+pygame.image.save(screen, str(final_frame))
+print(f"\n{'='*60}")
+print(f"✓ Session complete!")
+print(f"✓ Total frames saved: {frames_saved}")
+print(f"✓ Final frame saved: {final_frame}")
+print(f"✓ All frames in: {frames_dir.absolute()}")
+print(f"{'='*60}\n")
+
+pygame.quit()
+sys.exit()

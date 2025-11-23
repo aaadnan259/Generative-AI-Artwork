@@ -1,0 +1,336 @@
+import pygame
+import math
+import random
+import sys
+import numpy as np
+from pathlib import Path
+from scipy import ndimage
+import threading
+import time
+
+pygame.init()
+
+# Configuration
+WIDTH, HEIGHT = 1024, 1024
+RENDER_WIDTH, RENDER_HEIGHT = 384, 384  # Increased from 256 for better quality while keeping speed
+GALLERY_MODE = True  # Toggle between generator and gallery view with 'G'
+SLIDESHOW_DELAY = 0.083  # seconds between slides in gallery mode (approx 12 FPS)
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Generative Art - Generator & Gallery")
+
+clock = pygame.time.Clock()
+
+frames_dir = Path(r"C:\Users\aaadn\Downloads\Projects\GenAI\frames")
+frames_dir.mkdir(exist_ok=True)
+
+class MetaBall:
+    def __init__(self):
+        # Initialize in render coordinates
+        self.x = random.uniform(RENDER_WIDTH * 0.3, RENDER_WIDTH * 0.7)
+        self.y = random.uniform(RENDER_HEIGHT * 0.3, RENDER_HEIGHT * 0.7)
+        # Scale radius to render size (approx 1/4 of original)
+        self.radius = random.uniform(20, 50) # Slightly larger for higher res
+        self.base_radius = self.radius
+        
+        # Physics parameters for chaotic movement
+        self.t_offset_x = random.uniform(0, 100)
+        self.t_offset_y = random.uniform(0, 100)
+        self.freq_x1 = random.uniform(0.01, 0.03)
+        self.freq_x2 = random.uniform(0.02, 0.05)
+        self.freq_y1 = random.uniform(0.01, 0.03)
+        self.freq_y2 = random.uniform(0.02, 0.05)
+        self.amp_x = random.uniform(RENDER_WIDTH * 0.2, RENDER_WIDTH * 0.4)
+        self.amp_y = random.uniform(RENDER_HEIGHT * 0.2, RENDER_HEIGHT * 0.4)
+        
+    def update(self, t):
+        # Chaotic Lissajous-like movement to simulate splitting and merging
+        # The combination of two sine waves creates non-repeating, organic paths
+        
+        # Center point
+        cx = RENDER_WIDTH / 2
+        cy = RENDER_HEIGHT / 2
+        
+        # Calculate new position
+        self.x = cx + math.sin(t * self.freq_x1 + self.t_offset_x) * self.amp_x * 0.6 + \
+                      math.cos(t * self.freq_x2) * self.amp_x * 0.4
+                      
+        self.y = cy + math.cos(t * self.freq_y1 + self.t_offset_y) * self.amp_y * 0.6 + \
+                      math.sin(t * self.freq_y2) * self.amp_y * 0.4
+        
+        # Pulsate radius
+        self.radius = self.base_radius + math.sin(t * 0.05 + self.t_offset_x) * 12
+
+class FluidRenderer:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        # Increased metaball count for more complex morphing
+        self.metaballs = [MetaBall() for _ in range(12)]
+        
+        # Pre-compute coordinate grids
+        self.y_grid, self.x_grid = np.mgrid[0:height, 0:width]
+        
+        # Create a surface for the low-res render
+        self.render_surface = pygame.Surface((width, height))
+        
+    def calculate_smooth_field(self, t):
+        # Vectorized field calculation
+        field = np.zeros((self.height, self.width), dtype=np.float32)
+        
+        for ball in self.metaballs:
+            # Vectorized distance calculation
+            dx = self.x_grid - ball.x
+            dy = self.y_grid - ball.y
+            dist_sq = dx*dx + dy*dy
+            
+            # Avoid division by zero
+            dist_sq = np.maximum(dist_sq, 0.1)
+            
+            influence = (ball.radius * ball.radius) / dist_sq
+            field += influence
+            
+        return field
+    
+    def field_to_color(self, field, t):
+        # Vectorized color mapping
+        mask = field >= 0.8  # Threshold
+        
+        rgb_image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        
+        if not np.any(mask):
+            return rgb_image
+            
+        valid_field = field[mask]
+        
+        # Intensity mapping
+        intensity = np.clip(valid_field / 4.0, 0, 1.0)
+        
+        y_coords = self.y_grid[mask]
+        x_coords = self.x_grid[mask]
+        
+        # Dynamic coloring
+        hue = (t * 2.0 + intensity * 120 + x_coords * 0.2 + y_coords * 0.2) % 360
+        
+        h = hue / 60.0
+        s = 0.8 + intensity * 0.2
+        v = 0.6 + intensity * 0.4
+        c = v * s
+        x_val = c * (1 - np.abs(h % 2 - 1))
+        m = v - c
+        
+        r = np.zeros_like(h)
+        g = np.zeros_like(h)
+        b = np.zeros_like(h)
+        
+        cond1 = h < 1
+        cond2 = (h >= 1) & (h < 2)
+        cond3 = (h >= 2) & (h < 3)
+        cond4 = (h >= 3) & (h < 4)
+        cond5 = (h >= 4) & (h < 5)
+        cond6 = h >= 5
+        
+        r[cond1], g[cond1], b[cond1] = c[cond1], x_val[cond1], 0
+        r[cond2], g[cond2], b[cond2] = x_val[cond2], c[cond2], 0
+        r[cond3], g[cond3], b[cond3] = 0, c[cond3], x_val[cond3]
+        r[cond4], g[cond4], b[cond4] = 0, x_val[cond4], c[cond4]
+        r[cond5], g[cond5], b[cond5] = x_val[cond5], 0, c[cond5]
+        r[cond6], g[cond6], b[cond6] = c[cond6], 0, x_val[cond6]
+        
+        r = ((r + m) * 255).astype(np.uint8)
+        g = ((g + m) * 255).astype(np.uint8)
+        b = ((b + m) * 255).astype(np.uint8)
+        
+        rgb_image[mask, 0] = r
+        rgb_image[mask, 1] = g
+        rgb_image[mask, 2] = b
+        
+        return rgb_image
+    
+    def render(self, surface, t):
+        field = self.calculate_smooth_field(t)
+        rgb_image = self.field_to_color(field, t)
+        
+        # Swap axes for Pygame
+        rgb_image = np.swapaxes(rgb_image, 0, 1)
+        
+        # Blit to the low-res surface
+        pygame.surfarray.blit_array(self.render_surface, rgb_image)
+        
+        # Scale up to the destination surface
+        pygame.transform.scale(self.render_surface, surface.get_size(), surface)
+    
+    def update(self, t):
+        for ball in self.metaballs:
+            ball.update(t)
+
+class GalleryViewer:
+    def __init__(self, folder):
+        self.folder = Path(folder)
+        self.current_index = 0
+        self.images = []
+        self.last_check = 0
+        self.update_image_list()
+        
+    def update_image_list(self):
+        """Refresh the list of available images"""
+        files = []
+        if self.folder.exists():
+            for f in self.folder.iterdir():
+                if f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp']:
+                    files.append(f)
+        self.images = sorted(files, key=lambda x: x.stat().st_ctime)
+        
+    def get_next_image(self):
+        """Get the next image path, cycling through available images"""
+        if not self.images:
+            self.update_image_list()
+            return None
+            
+        if self.current_index >= len(self.images):
+            self.current_index = 0
+            self.update_image_list()  # Refresh to catch new images
+            
+        if self.images:
+            img_path = self.images[self.current_index]
+            self.current_index += 1
+            return img_path
+        return None
+    
+    def display_image(self, surface, image_path):
+        """Load and display an image scaled to fit the screen"""
+        try:
+            img = pygame.image.load(str(image_path)).convert()
+            img = pygame.transform.scale(img, (WIDTH, HEIGHT))
+            surface.blit(img, (0, 0))
+            
+            # Add overlay text
+            font = pygame.font.Font(None, 36)
+            text = font.render(f"Gallery: {image_path.name}", True, (255, 255, 255))
+            text_bg = pygame.Surface((text.get_width() + 20, text.get_height() + 10))
+            text_bg.set_alpha(180)
+            text_bg.fill((0, 0, 0))
+            surface.blit(text_bg, (10, HEIGHT - 50))
+            surface.blit(text, (20, HEIGHT - 45))
+            
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+
+def draw_smooth_glow(surface, x, y, radius, color, intensity=1.0):
+    glow_surface = pygame.Surface((radius * 4, radius * 4), pygame.SRCALPHA)
+    for r in range(int(radius * 2), 0, -1):
+        alpha = int((r / (radius * 2)) ** 2 * 100 * intensity)
+        glow_color = (*color, alpha)
+        pygame.draw.circle(glow_surface, glow_color, (radius * 2, radius * 2), r)
+    surface.blit(glow_surface, (x - radius * 2, y - radius * 2), special_flags=pygame.BLEND_RGBA_ADD)
+
+def draw_mode_indicator(surface, mode_text):
+    """Draw current mode in corner"""
+    font = pygame.font.Font(None, 32)
+    text = font.render(mode_text, True, (255, 255, 255))
+    text_bg = pygame.Surface((text.get_width() + 20, text.get_height() + 10))
+    text_bg.set_alpha(180)
+    text_bg.fill((0, 0, 0))
+    surface.blit(text_bg, (10, 10))
+    surface.blit(text, (20, 15))
+
+# Initialize systems
+fluid = FluidRenderer(RENDER_WIDTH, RENDER_HEIGHT)
+gallery = GalleryViewer(frames_dir)
+
+# Main loop variables
+t = 0
+frame_count = 0
+running = True
+frames_saved = 0
+gallery_mode = False
+last_slide_time = time.time()
+
+print("\n" + "="*60)
+print("GENERATIVE ART - INTEGRATED SYSTEM")
+print("="*60)
+print("CONTROLS:")
+print("  G: Toggle between Generator and Gallery mode")
+print("  S: Save current frame (generator mode)")
+print("  SPACE: Next image (gallery mode)")
+print("  ESC: Exit")
+print("\nMODES:")
+print("  Generator: Creates fluid morph art, auto-saves every 10 frames")
+print("  Gallery: Slideshow of generated frames")
+print("="*60 + "\n")
+
+while running:
+    current_time = time.time()
+    
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            elif event.key == pygame.K_g:
+                gallery_mode = not gallery_mode
+                gallery.update_image_list()  # Refresh image list when entering gallery
+                last_slide_time = current_time
+                print(f"Switched to: {'GALLERY' if gallery_mode else 'GENERATOR'} mode")
+            elif event.key == pygame.K_s and not gallery_mode:
+                filename = frames_dir / f"manual_save_{frame_count}.png"
+                pygame.image.save(screen, str(filename))
+                print(f"✓ Manually saved: {filename}")
+            elif event.key == pygame.K_SPACE and gallery_mode:
+                last_slide_time = 0  # Force next image
+    
+    screen.fill((0, 0, 0))
+    
+    if gallery_mode:
+        # Gallery mode - slideshow
+        if current_time - last_slide_time >= SLIDESHOW_DELAY:
+            last_slide_time = current_time
+            
+        img_path = gallery.get_next_image()
+        if img_path:
+            gallery.display_image(screen, img_path)
+        else:
+            # No images yet
+            font = pygame.font.Font(None, 48)
+            text = font.render("No frames generated yet!", True, (255, 255, 255))
+            text_rect = text.get_rect(center=(WIDTH//2, HEIGHT//2))
+            screen.blit(text, text_rect)
+            
+        draw_mode_indicator(screen, "Mode: GALLERY")
+        
+        # Wait for slideshow delay
+        time.sleep(SLIDESHOW_DELAY)
+        
+    else:
+        # Generator mode
+        fluid.update(t)
+        fluid.render(screen, t)
+        
+        # Auto-save frames
+        if frame_count % 10 == 0:
+            frame_filename = frames_dir / f"frame_{frame_count:05d}.png"
+            pygame.image.save(screen, str(frame_filename))
+            frames_saved += 1
+            if frames_saved % 5 == 0:
+                print(f"Progress: {frames_saved} frames saved (frame #{frame_count})")
+        
+        draw_mode_indicator(screen, "Mode: GENERATOR")
+        
+        t += 0.15
+        frame_count += 1
+        clock.tick(30)
+    
+    pygame.display.flip()
+
+# Save final frame
+final_frame = frames_dir / "final_frame.png"
+pygame.image.save(screen, str(final_frame))
+print(f"\n{'='*60}")
+print(f"✓ Session complete!")
+print(f"✓ Total frames saved: {frames_saved}")
+print(f"✓ Final frame: {final_frame}")
+print(f"{'='*60}\n")
+
+pygame.quit()
+sys.exit()
